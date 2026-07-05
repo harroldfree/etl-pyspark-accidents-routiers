@@ -5,7 +5,7 @@ Rapport de projet - Pipeline Spark (Jour 4)
 Équipe : NWAGOUM WAMENE HARROLD
 
 
-Gabarit du livrable noté. Remplir chaque section. Court et dense : extraits de code, extraits de résultats, captures. Pas de pavé. Les sections reprennent le plan du rapport (section 5 de projects/projet-jour-4.md). La grille reste le barème ; la qualité du code est notée sur le code lui-même, pas dans ce document.
+
 
 Équipe : [noms]
 
@@ -241,19 +241,7 @@ Job observé : n'importe quelle action déclenchée sur `caract` après nettoyag
 
  dev
 
-Où se produit le shuffle (Exchange) — extrait réel de `.explain()` :
-```
-== Physical Plan ==
-AdaptiveSparkPlan isFinalPlan=false
-+- HashAggregate(keys=[dep#6], functions=[count(1)])
-   +- Exchange hashpartitioning(dep#6, 200), ENSURE_REQUIREMENTS         <-- shuffle n°2
-      +- HashAggregate(keys=[dep#6], functions=[partial_count(1)])
-         +- HashAggregate(keys=[15 colonnes de caract], functions=[])
-            +- Exchange hashpartitioning(15 colonnes, 200), ENSURE_REQUIREMENTS  <-- shuffle n°1
-               +- HashAggregate(keys=[15 colonnes], functions=[])
-                  +- Filter isnotnull(Num_Acc#0L)
-                     +- FileScan csv [...]
-```
+
 
 
 Deux `Exchange` (shuffles) apparaissent, pas un seul :
