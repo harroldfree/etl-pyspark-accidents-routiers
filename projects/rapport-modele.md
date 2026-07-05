@@ -7,7 +7,6 @@ Rapport de projet - Pipeline Spark (Jour 4)
 
 
 
-Équipe : [noms]
 
 Jeu de données : ONISR (accidents corporels de la circulation routière, France, 2024)
 Date : 2026-07-05
