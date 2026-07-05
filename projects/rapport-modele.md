@@ -1,6 +1,6 @@
 Rapport de projet - Pipeline Spark (Jour 4)
 
- dev
+
 
 Équipe : NWAGOUM WAMENE HARROLD
 
@@ -12,7 +12,7 @@ Jeu de données : ONISR (accidents corporels de la circulation routière, France
 Date : 2026-07-05
 
 ## 1. Jeu de données et schéma cible
- dev
+ 
 Source : [data.gouv.fr — Bases de données annuelles des accidents corporels de la circulation routière (2005-2024)](https://www.data.gouv.fr/datasets/bases-de-donnees-annuelles-des-accidents-corporels-de-la-circulation-routiere-annees-de-2005-a-2024), millésime 2024, téléchargé le 2026-07-05.
 
 Volume : 4 fichiers CSV reliés par `Num_Acc` (séparateur `;`, encodage UTF-8, décimales GPS en virgule) :
@@ -81,7 +81,7 @@ Lignes brutes : 54 402 (caract) / 70 248 (lieux) / 92 678 (vehicules) / 125 187 
 
 Partitionnement de la silver (colonne, pourquoi) : colonne catégorielle à faible cardinalité propre à chaque table, pour permettre le partition pruning sur les requêtes futures — `dep` (département) pour `caract`, `catr` (catégorie de route) pour `lieux`, `catv` (catégorie de véhicule) pour `vehicules`, `catu` (catégorie d'usager) pour `usagers`.
 
- dev
+ 
 Écriture effective de la couche silver : `dfs[...].write.mode("overwrite").partitionBy(...).parquet("output/silver/...")` pour les 4 tables. Bloquée initialement sous Windows natif (`winutils.exe`/`HADOOP_HOME` manquants pour l'écriture locale via Hadoop) ; débloquée en exécutant le pipeline sous Debian (WSL2), où Spark écrit directement sur un filesystem Linux sans dépendance à Hadoop natif Windows. Vérifié : `output/silver/caract/` contient bien un fichier `_SUCCESS` et un sous-dossier par valeur de `dep` (`dep=01`, `dep=02`, ...), même schéma de partitionnement pour les 3 autres tables.
 
 
@@ -190,7 +190,7 @@ Optimisation choisie : cache — sur `caract` (nettoyé), réutilisé par les 3 
 
 Pourquoi : sans cache, Spark étant paresseux, chaque action (`.show()`, `.count()`) redéclenche toute la chaîne de lecture CSV + nettoyage (dont `dropDuplicates`, une opération avec shuffle) depuis le disque.
 
- dev
+ 
 Mesure avant/après (3 actions : `count()`, `groupBy("dep").count()`, `groupBy("lum").count()`, exécutées deux fois de suite pour vérifier la reproductibilité — code : `chronometre()` dans `mesure_optimisation_cache`, [pipeline.py](../pipeline.py#L260-L299)) :
 
 ```
@@ -215,19 +215,7 @@ Gain : -508 % / -496 % (le cache est ~6x plus LENT ici)
 
 **Résultat contre-intuitif, expliqué avec extrait de plan** : `caract` ne fait que 5 partitions et ~54 000 lignes issues d'un CSV de quelques Mo — la lecture + le nettoyage sont déjà bon marché. `explain()` montre que la version cache remplace le `FileScan` par un `InMemoryTableScan` sur une `InMemoryRelation` en `StorageLevel(disk, memory, deserialized)` :
 
-```
---- sans cache ---
-HashAggregate(keys=[dep#6], ...)
-+- Exchange hashpartitioning(dep#6, 200), ...
-   +- HashAggregate(...)
-      +- FileScan csv [...] Format: CSV, ...
 
---- avec cache ---
-HashAggregate(keys=[dep#6], ...)
-+- Exchange hashpartitioning(dep#6, 200), ...
-   +- InMemoryTableScan [dep#6]
-         +- InMemoryRelation [...], StorageLevel(disk, memory, deserialized, 1 replicas)
-```
 
 
 Le coût de matérialisation en cache (sérialisation + gestion mémoire du storage level `MEMORY_AND_DISK`) dépasse ici le gain de ne pas relire un petit fichier CSV, dans un Spark local mono-JVM (driver = executor, ressources partagées avec le reste du script). Conclusion : sur un petit volume avec peu de réutilisations, le cache n'est pas automatiquement gagnant — son intérêt croît avec la taille des données et/ou le nombre de réutilisations (à re-tester sur un jeu multi-années pour confirmer le seuil de rentabilité).
@@ -238,7 +226,7 @@ Ce que ça change : décision de ne pas garder le cache sur `caract` pour ce vol
 
 Job observé : n'importe quelle action déclenchée sur `caract` après nettoyage (ex. `caract.groupBy("dep").count()`, sous-jacent à l'Analyse 3) — `caract` compte 5 partitions en entrée (issues du split du CSV), confirmé par `caract.rdd.getNumPartitions()`.
 
- dev
+ 
 
 
 
@@ -332,7 +320,6 @@ Ce qui a bloqué :
 
 Ce qu'on ferait avec plus de temps :
 - Retester le cache sur un volume multi-années pour identifier le seuil à partir duquel il devient rentable.
-dev
 - Lire la couche silver Parquet fraîchement écrite pour vérifier le partition pruning (plan `.explain()` avec filtre sur la colonne de partition).
 
 - Écrire réellement la couche silver partitionnée une fois l'environnement Hadoop/Windows réglé.
