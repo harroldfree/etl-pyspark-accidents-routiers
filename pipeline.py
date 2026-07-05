@@ -166,19 +166,36 @@ def clean_outliers(dataframes):
     caract = dataframes["caract"] \
         .withColumn("lat", regexp_replace(col("lat"), ",", ".").cast(DoubleType())) \
         .withColumn("long", regexp_replace(col("long"), ",", ".").cast(DoubleType()))
+ dev
+    print("\nDistribution lat/long avant filtrage des bornes :")
+    caract.select("lat", "long").describe().show()
+    caract = caract.withColumn(
+        "lat", when((col("lat") >= -22) & (col("lat") <= 51.1), col("lat"))
+
     caract = caract.withColumn(
         "lat", when((col("lat") >= -22) & (col("lat") <= 51), col("lat"))
+ 
     ).withColumn(
         "long", when((col("long") >= -178) & (col("long") <= 168), col("long"))
     )
 
     # usagers: année de naissance hors bornes plausibles -> null (pas de suppression de ligne)
+dev
+    print("\nDistribution an_nais avant filtrage des bornes :")
+    dataframes["usagers"].select("an_nais").describe().show()
+
+
     usagers = dataframes["usagers"].withColumn(
         "an_nais",
         when((col("an_nais") >= 1900) & (col("an_nais") <= 2024), col("an_nais"))
     )
 
     # lieux: vitesse maximale autorisée négative ou irréaliste -> null
+ dev
+    print("\nDistribution vma avant filtrage des bornes :")
+    dataframes["lieux"].select("vma").describe().show()
+
+
     lieux = dataframes["lieux"].withColumn(
         "vma",
         when((col("vma") >= 0) & (col("vma") <= 300), col("vma"))
@@ -264,6 +281,102 @@ def mesure_optimisation_cache(dfs):
         df.groupBy("dep").count().count()
         df.groupBy("lum").count().count()
 
+ dev
+    def chronometre(df, label, n_passes=2):
+        durees = []
+        for _ in range(n_passes):
+            debut = time.time()
+            trois_actions(df)
+            durees.append(time.time() - debut)
+        print(f"{label} : " + " puis ".join(f"{d:.2f} s" for d in durees))
+        return durees
+
+    # Sans cache : chaque action redéclenche la lecture CSV + le nettoyage complets
+    durees_sans_cache = chronometre(caract, "Sans cache")
+
+    # Plan "sans cache" capturé avant le .cache() : caract et caract_cache partagent le même
+    # plan logique une fois mis en cache, un explain() tardif montrerait le cache des deux côtés.
+    print("\nPlan physique (groupBy(\"dep\").count()) sans cache :")
+    caract.groupBy("dep").count().explain()
+
+    # Avec cache : la première action matérialise le résultat, les suivantes le réutilisent
+    caract_cache = caract.cache()
+    durees_avec_cache = chronometre(caract_cache, "Avec cache")
+
+    print("\nPlan physique (groupBy(\"dep\").count()) avec cache :")
+    caract_cache.groupBy("dep").count().explain()
+
+    for i, (sans, avec) in enumerate(zip(durees_sans_cache, durees_avec_cache), start=1):
+        gain = (1 - avec / sans) * 100
+        print(f"Gain (passage {i}) : {gain:.1f}%")
+
+    caract_cache.unpersist()
+    return durees_sans_cache, durees_avec_cache
+
+# ============================================================================
+# EXPLORATION AU-DELA DU COURS : AQE et nombre de partitions de shuffle
+# ============================================================================
+
+def exploration_aqe_partitions(spark, dfs):
+    """
+    Mesure l'effet de l'Adaptive Query Execution (AQE) et de spark.sql.shuffle.partitions
+    sur le nombre de tasks réellement exécutées pour caract.groupBy("dep").count().
+
+    Protocole : un seul réglage varie à la fois (AQE on/off, puis nombre de partitions),
+    le reste (données, requête, machine) reste fixe. Mesure via l'API REST de la Spark UI
+    (nombre de tasks par stage), pas une lecture visuelle de l'UI.
+    """
+    import urllib.request
+    import json
+
+    print("\n" + "="*60)
+    print("EXPLORATION - AQE ET NOMBRE DE PARTITIONS DE SHUFFLE")
+    print("="*60)
+
+    app_id = spark.sparkContext.applicationId
+
+    def tasks_du_dernier_job():
+        jobs = json.loads(urllib.request.urlopen(
+            f"http://localhost:4040/api/v1/applications/{app_id}/jobs"
+        ).read())
+        dernier = jobs[0]  # l'API liste les jobs du plus récent au plus ancien
+        stages = json.loads(urllib.request.urlopen(
+            f"http://localhost:4040/api/v1/applications/{app_id}/stages"
+        ).read())
+        par_id = {s["stageId"]: s["numTasks"] for s in stages}
+        return [par_id[sid] for sid in sorted(dernier["stageIds"])]
+
+    # caract mis en cache une fois pour isoler l'effet sur le shuffle du groupBy,
+    # sans reconfondre avec le coût du dropDuplicates/CSV à chaque configuration testée.
+    caract = dfs["caract"].cache()
+    caract.count()
+
+    configs = [
+        ("AQE on (défaut Spark 4), 200 partitions",   True,  200),
+        ("AQE off, 200 partitions (config par défaut sans AQE)", False, 200),
+        ("AQE off, 8 partitions (réglage manuel pour ce volume)", False, 8),
+    ]
+
+    resultats = []
+    for label, aqe_actif, nb_partitions in configs:
+        spark.conf.set("spark.sql.adaptive.enabled", aqe_actif)
+        spark.conf.set("spark.sql.shuffle.partitions", nb_partitions)
+
+        debut = time.time()
+        caract.groupBy("dep").count().count()
+        duree = time.time() - debut
+
+        tasks = tasks_du_dernier_job()
+        print(f"{label} : {duree:.2f} s, tasks par stage = {tasks}")
+        resultats.append((label, duree, tasks))
+
+    # Réinitialisation des réglages par défaut pour la suite du pipeline
+    spark.conf.set("spark.sql.adaptive.enabled", True)
+    spark.conf.set("spark.sql.shuffle.partitions", 200)
+    caract.unpersist()
+
+    return resultats
+
     # Sans cache : chaque action redéclenche la lecture CSV + le nettoyage complets
     debut = time.time()
     trois_actions(caract)
@@ -282,6 +395,7 @@ def mesure_optimisation_cache(dfs):
 
     caract_cache.unpersist()
     return duree_sans_cache, duree_avec_cache
+n
 
 # ============================================================================
 # MAIN
@@ -320,6 +434,16 @@ if __name__ == "__main__":
         check_missing_values(df, name)
 
     # Écriture de la couche Silver, partitionnée par colonne à faible cardinalité
+ dev
+    print("\n" + "="*60)
+    print("EXPORT COUCHE SILVER")
+    print("="*60)
+    dfs["caract"].write.mode("overwrite").partitionBy("dep").parquet("output/silver/caract")
+    dfs["lieux"].write.mode("overwrite").partitionBy("catr").parquet("output/silver/lieux")
+    dfs["vehicules"].write.mode("overwrite").partitionBy("catv").parquet("output/silver/vehicules")
+    dfs["usagers"].write.mode("overwrite").partitionBy("catu").parquet("output/silver/usagers")
+    print("✓ Couche silver écrite dans output/silver/")
+
     # (à décommenter une fois winutils.exe / HADOOP_HOME configurés sur la machine)
     print("\n" + "="*60)
     print("EXPORT COUCHE SILVER")
@@ -330,6 +454,7 @@ if __name__ == "__main__":
     # dfs["usagers"].write.mode("overwrite").partitionBy("catu").parquet("output/silver/usagers")
     print("✓ Prêt pour export (à décommenter une fois winutils configuré)")
 
+
     # Optimisation mesurée : cache sur 'caract' (réutilisé par les 3 analyses)
     mesure_optimisation_cache(dfs)
 
@@ -337,6 +462,12 @@ if __name__ == "__main__":
     analyse_gravite_par_meteo(dfs)
     analyse_accidents_par_heure_jour(dfs)
     analyse_classement_departements(dfs)
+ dev
+
+    # Exploration au-delà du cours : AQE et nombre de partitions de shuffle
+    exploration_aqe_partitions(spark, dfs)
+
+
 
     print("\n✓ Pipeline exécuté avec succès!")
 
