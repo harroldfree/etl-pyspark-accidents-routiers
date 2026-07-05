@@ -166,25 +166,36 @@ def clean_outliers(dataframes):
     caract = dataframes["caract"] \
         .withColumn("lat", regexp_replace(col("lat"), ",", ".").cast(DoubleType())) \
         .withColumn("long", regexp_replace(col("long"), ",", ".").cast(DoubleType()))
+ dev
     print("\nDistribution lat/long avant filtrage des bornes :")
     caract.select("lat", "long").describe().show()
     caract = caract.withColumn(
         "lat", when((col("lat") >= -22) & (col("lat") <= 51.1), col("lat"))
+
+    caract = caract.withColumn(
+        "lat", when((col("lat") >= -22) & (col("lat") <= 51), col("lat"))
+ 
     ).withColumn(
         "long", when((col("long") >= -178) & (col("long") <= 168), col("long"))
     )
 
     # usagers: année de naissance hors bornes plausibles -> null (pas de suppression de ligne)
+dev
     print("\nDistribution an_nais avant filtrage des bornes :")
     dataframes["usagers"].select("an_nais").describe().show()
+
+
     usagers = dataframes["usagers"].withColumn(
         "an_nais",
         when((col("an_nais") >= 1900) & (col("an_nais") <= 2024), col("an_nais"))
     )
 
     # lieux: vitesse maximale autorisée négative ou irréaliste -> null
+ dev
     print("\nDistribution vma avant filtrage des bornes :")
     dataframes["lieux"].select("vma").describe().show()
+
+
     lieux = dataframes["lieux"].withColumn(
         "vma",
         when((col("vma") >= 0) & (col("vma") <= 300), col("vma"))
@@ -270,6 +281,7 @@ def mesure_optimisation_cache(dfs):
         df.groupBy("dep").count().count()
         df.groupBy("lum").count().count()
 
+ dev
     def chronometre(df, label, n_passes=2):
         durees = []
         for _ in range(n_passes):
@@ -365,6 +377,26 @@ def exploration_aqe_partitions(spark, dfs):
 
     return resultats
 
+    # Sans cache : chaque action redéclenche la lecture CSV + le nettoyage complets
+    debut = time.time()
+    trois_actions(caract)
+    duree_sans_cache = time.time() - debut
+    print(f"Sans cache : {duree_sans_cache:.2f} s pour 3 actions")
+
+    # Avec cache : la première action matérialise le résultat, les suivantes le réutilisent
+    caract_cache = caract.cache()
+    debut = time.time()
+    trois_actions(caract_cache)
+    duree_avec_cache = time.time() - debut
+    print(f"Avec cache : {duree_avec_cache:.2f} s pour 3 actions")
+
+    gain = (1 - duree_avec_cache / duree_sans_cache) * 100
+    print(f"Gain : {gain:.1f}%")
+
+    caract_cache.unpersist()
+    return duree_sans_cache, duree_avec_cache
+n
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -402,6 +434,7 @@ if __name__ == "__main__":
         check_missing_values(df, name)
 
     # Écriture de la couche Silver, partitionnée par colonne à faible cardinalité
+ dev
     print("\n" + "="*60)
     print("EXPORT COUCHE SILVER")
     print("="*60)
@@ -411,6 +444,17 @@ if __name__ == "__main__":
     dfs["usagers"].write.mode("overwrite").partitionBy("catu").parquet("output/silver/usagers")
     print("✓ Couche silver écrite dans output/silver/")
 
+    # (à décommenter une fois winutils.exe / HADOOP_HOME configurés sur la machine)
+    print("\n" + "="*60)
+    print("EXPORT COUCHE SILVER")
+    print("="*60)
+    # dfs["caract"].write.mode("overwrite").partitionBy("dep").parquet("output/silver/caract")
+    # dfs["lieux"].write.mode("overwrite").partitionBy("catr").parquet("output/silver/lieux")
+    # dfs["vehicules"].write.mode("overwrite").partitionBy("catv").parquet("output/silver/vehicules")
+    # dfs["usagers"].write.mode("overwrite").partitionBy("catu").parquet("output/silver/usagers")
+    print("✓ Prêt pour export (à décommenter une fois winutils configuré)")
+
+
     # Optimisation mesurée : cache sur 'caract' (réutilisé par les 3 analyses)
     mesure_optimisation_cache(dfs)
 
@@ -418,9 +462,12 @@ if __name__ == "__main__":
     analyse_gravite_par_meteo(dfs)
     analyse_accidents_par_heure_jour(dfs)
     analyse_classement_departements(dfs)
+ dev
 
     # Exploration au-delà du cours : AQE et nombre de partitions de shuffle
     exploration_aqe_partitions(spark, dfs)
+
+
 
     print("\n✓ Pipeline exécuté avec succès!")
 

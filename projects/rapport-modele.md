@@ -1,16 +1,25 @@
 Rapport de projet - Pipeline Spark (Jour 4)
 
+ dev
 
 Équipe : NWAGOUM WAMENE HARROLD
+
+
+Gabarit du livrable noté. Remplir chaque section. Court et dense : extraits de code, extraits de résultats, captures. Pas de pavé. Les sections reprennent le plan du rapport (section 5 de projects/projet-jour-4.md). La grille reste le barème ; la qualité du code est notée sur le code lui-même, pas dans ce document.
+
+Équipe : [noms]
 
 Jeu de données : ONISR (accidents corporels de la circulation routière, France, 2024)
 Date : 2026-07-05
 
 ## 1. Jeu de données et schéma cible
-
+ dev
 Source : [data.gouv.fr — Bases de données annuelles des accidents corporels de la circulation routière (2005-2024)](https://www.data.gouv.fr/datasets/bases-de-donnees-annuelles-des-accidents-corporels-de-la-circulation-routiere-annees-de-2005-a-2024), millésime 2024, téléchargé le 2026-07-05.
 
 Volume : 4 fichiers CSV reliés par `Num_Acc` (séparateur `;`, encodage UTF-8, décimales GPS en virgule) :
+
+Source et volume : ONISR, 4 fichiers CSV reliés par `Num_Acc` (séparateur `;`, encodage UTF-8, décimales GPS en virgule) :
+
 - `caract-2024.csv` — 54 402 lignes — caractéristiques de l'accident (date, heure, lieu, météo, luminosité, collision)
 - `lieux-2024.csv` — 70 248 lignes — description du lieu (catégorie de route, profil, vitesse max autorisée...)
 - `vehicules-2024.csv` — 92 678 lignes — véhicules impliqués (catégorie, choc, manœuvre...)
@@ -44,6 +53,8 @@ vma (lieux, 66 618 valeurs non nulles sur 70 248) :
 ```
 Lecture : `lat`/`long` et `an_nais` ne contiennent en réalité aucune valeur hors bornes plausibles pour ce millésime (les bornes servent de garde-fou, pas de correction active) — la borne `lat` a d'ailleurs été resserrée par erreur à `51` puis corrigée à `51.1` en comparant au max réel observé (51.08, cohérent avec le point le plus au nord de la France métropolitaine). `vma`, en revanche, contient une vraie valeur aberrante (max 900 km/h), confirmant que la borne `[0, 300]` est nécessaire et efficace.
 
+
+
 Questions métier visées : la gravité varie-t-elle selon la météo ? Quels créneaux horaires concentrent le plus d'accidents ? Quels départements sont les plus touchés ?
 
 ## 2. Pipeline (bronze -> silver -> gold)
@@ -71,7 +82,11 @@ Lignes brutes : 54 402 (caract) / 70 248 (lieux) / 92 678 (vehicules) / 125 187 
 
 Partitionnement de la silver (colonne, pourquoi) : colonne catégorielle à faible cardinalité propre à chaque table, pour permettre le partition pruning sur les requêtes futures — `dep` (département) pour `caract`, `catr` (catégorie de route) pour `lieux`, `catv` (catégorie de véhicule) pour `vehicules`, `catu` (catégorie d'usager) pour `usagers`.
 
+ dev
 Écriture effective de la couche silver : `dfs[...].write.mode("overwrite").partitionBy(...).parquet("output/silver/...")` pour les 4 tables. Bloquée initialement sous Windows natif (`winutils.exe`/`HADOOP_HOME` manquants pour l'écriture locale via Hadoop) ; débloquée en exécutant le pipeline sous Debian (WSL2), où Spark écrit directement sur un filesystem Linux sans dépendance à Hadoop natif Windows. Vérifié : `output/silver/caract/` contient bien un fichier `_SUCCESS` et un sous-dossier par valeur de `dep` (`dep=01`, `dep=02`, ...), même schéma de partitionnement pour les 3 autres tables.
+
+
+*(Écriture effective de la couche silver en attente : blocage d'environnement Windows — `winutils.exe`/`HADOOP_HOME` manquants pour l'écriture locale via Hadoop. Le nettoyage est validé en mémoire ; l'écriture sera débloquée avant la fin du projet.)*
 
 
 ## 3. Analyses
@@ -176,6 +191,7 @@ Optimisation choisie : cache — sur `caract` (nettoyé), réutilisé par les 3 
 
 Pourquoi : sans cache, Spark étant paresseux, chaque action (`.show()`, `.count()`) redéclenche toute la chaîne de lecture CSV + nettoyage (dont `dropDuplicates`, une opération avec shuffle) depuis le disque.
 
+ dev
 Mesure avant/après (3 actions : `count()`, `groupBy("dep").count()`, `groupBy("lum").count()`, exécutées deux fois de suite pour vérifier la reproductibilité — code : `chronometre()` dans `mesure_optimisation_cache`, [pipeline.py](../pipeline.py#L260-L299)) :
 
 ```
@@ -190,6 +206,31 @@ Gain (passage 2) : -219.1 % (le cache est 3 à 4x plus LENT ici)
 
 
 
+Mesure avant/après (3 actions : `count()`, `groupBy("dep").count()`, `groupBy("lum").count()`, exécutées deux fois de suite pour vérifier la reproductibilité) :
+
+```
+avant (sans cache) : 2.89 s puis 3.16 s
+après (avec .cache()) : 17.59 s puis 18.83 s
+Gain : -508 % / -496 % (le cache est ~6x plus LENT ici)
+```
+
+**Résultat contre-intuitif, expliqué avec extrait de plan** : `caract` ne fait que 5 partitions et ~54 000 lignes issues d'un CSV de quelques Mo — la lecture + le nettoyage sont déjà bon marché. `explain()` montre que la version cache remplace le `FileScan` par un `InMemoryTableScan` sur une `InMemoryRelation` en `StorageLevel(disk, memory, deserialized)` :
+
+```
+--- sans cache ---
+HashAggregate(keys=[dep#6], ...)
++- Exchange hashpartitioning(dep#6, 200), ...
+   +- HashAggregate(...)
+      +- FileScan csv [...] Format: CSV, ...
+
+--- avec cache ---
+HashAggregate(keys=[dep#6], ...)
++- Exchange hashpartitioning(dep#6, 200), ...
+   +- InMemoryTableScan [dep#6]
+         +- InMemoryRelation [...], StorageLevel(disk, memory, deserialized, 1 replicas)
+```
+
+
 Le coût de matérialisation en cache (sérialisation + gestion mémoire du storage level `MEMORY_AND_DISK`) dépasse ici le gain de ne pas relire un petit fichier CSV, dans un Spark local mono-JVM (driver = executor, ressources partagées avec le reste du script). Conclusion : sur un petit volume avec peu de réutilisations, le cache n'est pas automatiquement gagnant — son intérêt croît avec la taille des données et/ou le nombre de réutilisations (à re-tester sur un jeu multi-années pour confirmer le seuil de rentabilité).
 
 Ce que ça change : décision de ne pas garder le cache sur `caract` pour ce volume de données ; piste à documenter comme résultat négatif plutôt que comme échec.
@@ -198,13 +239,29 @@ Ce que ça change : décision de ne pas garder le cache sur `caract` pour ce vol
 
 Job observé : n'importe quelle action déclenchée sur `caract` après nettoyage (ex. `caract.groupBy("dep").count()`, sous-jacent à l'Analyse 3) — `caract` compte 5 partitions en entrée (issues du split du CSV), confirmé par `caract.rdd.getNumPartitions()`.
 
+ dev
+
+Où se produit le shuffle (Exchange) — extrait réel de `.explain()` :
+```
+== Physical Plan ==
+AdaptiveSparkPlan isFinalPlan=false
++- HashAggregate(keys=[dep#6], functions=[count(1)])
+   +- Exchange hashpartitioning(dep#6, 200), ENSURE_REQUIREMENTS         <-- shuffle n°2
+      +- HashAggregate(keys=[dep#6], functions=[partial_count(1)])
+         +- HashAggregate(keys=[15 colonnes de caract], functions=[])
+            +- Exchange hashpartitioning(15 colonnes, 200), ENSURE_REQUIREMENTS  <-- shuffle n°1
+               +- HashAggregate(keys=[15 colonnes], functions=[])
+                  +- Filter isnotnull(Num_Acc#0L)
+                     +- FileScan csv [...]
+```
+
 
 Deux `Exchange` (shuffles) apparaissent, pas un seul :
 1. **Shuffle n°1** : provient de `dropDuplicates()` dans `clean_data`. Spark l'implémente comme un `groupBy` sur *toutes* les colonnes (15 pour `caract`) pour détecter les doublons — un shuffle sur l'ensemble des colonnes, donc plus coûteux qu'il n'y paraît dans le code (`dropDuplicates()` a l'air anodin mais déclenche un repartitionnement complet des données).
 2. **Shuffle n°2** : le vrai `groupBy("dep")` de l'analyse — repartitionnement sur la seule colonne `dep` pour regrouper les lignes du même département avant de compter.
 
 Le même schéma (shuffle du `dropDuplicates` + shuffle du `groupBy`/`join` de l'analyse) se retrouve dans les 3 analyses et dans l'optimisation cache, puisqu'elles partagent toutes la même lignée `caract` nettoyée.
-
+ dev
 Nombre de stages et de tasks — **vérifié via l'API REST de la Spark UI** (`/api/v1/applications/<id>/stages`), pas juste lu à l'œil sur l'UI : job isolé sur `caract.groupBy("dep").count().count()`, 3 stages, **4 tasks au total (2 puis 1 puis 1)** — très loin des « jusqu'à 200 tasks » qu'on pourrait attendre de `spark.sql.shuffle.partitions`.
 
 Explication : Spark 4 active l'**Adaptive Query Execution (AQE)** par défaut (visible dans le plan via `AdaptiveSparkPlan`), dont l'optimisation `CoalescePartitions` fusionne automatiquement les partitions de shuffle trop petites après avoir mesuré la taille réelle des données au runtime. Sur ce volume (54 402 lignes, quelques dizaines de Ko par partition de shuffle), AQE ramène les 200 partitions théoriques à 1 ou 2 partitions effectives — la valeur `200` de `spark.sql.shuffle.partitions` n'est donc qu'un plafond de configuration, pas le nombre de tasks réellement exécutées. C'est directement la piste d'exploration « AQE et nombre de partitions » proposée en section 6.
@@ -246,18 +303,50 @@ Lecture directe du tableau : stages 267-269 (`200/200` puis `200/200` puis `1/1`
 
 **Conclusion (contre-intuitive)** : l'AQE fait bien son travail (200 → 1 task sur le stage final), mais **le réglage manuel à 8 partitions est ~2,6x plus rapide que l'AQE** (1,10 s contre 2,81 s), et même légèrement plus rapide que la config par défaut sans AQE. L'AQE ajoute un coût de replanification adaptative (collecte de statistiques après le premier stage de shuffle, re-optimisation du plan) qui, sur un volume aussi petit, pèse plus lourd que le gain apporté par le coalescing. Pour ce pipeline (volume fixe et connu à l'avance), fixer `spark.sql.shuffle.partitions` à une valeur adaptée au volume réel bat à la fois l'AQE et le réglage par défaut. L'AQE reste utile comme filet de sécurité générique quand le volume varie ou est inconnu à l'avance (cas le plus courant en production) — mais ce n'est pas un remplacement automatique d'un réglage manuel pertinent sur un pipeline au volume stable.
 
+Nombre de stages et de tasks : 3 stages, séparés par les 2 `Exchange` ci-dessus.
+- Stage 1 (lecture + filtre + agrégat partiel du dédoublonnage) : **5 tasks**, une par partition du fichier CSV source.
+- Stage 2 (fin du dédoublonnage après le 1ᵉʳ shuffle + agrégat partiel du `groupBy`) : jusqu'à **200 tasks** — `spark.sql.shuffle.partitions` vaut 200 par défaut, alors que le volume réel (54 402 lignes / 200 ≈ 272 lignes par partition) ne le justifie pas. C'est un déséquilibre nombre-de-partitions/volume typique d'un petit jeu de données, à mettre en lien avec la piste d'exploration « AQE et nombre de partitions » (section 6).
+- Stage 3 (agrégat final après le 2ᵉ shuffle, un par département) : jusqu'à 200 tasks également, mais très peu de données par task vu qu'il n'y a qu'une centaine de départements distincts au final.
+
+Capture(s) : [à insérer — voir note ci-dessous]
+
+Commentaire : deux shuffles pour une opération qui semble être « juste un `groupBy` » dans le code est le point le plus instructif de cette lecture de plan : le `dropDuplicates()` du nettoyage est loin d'être gratuit, et se répercute sur chacune des 3 analyses qui réutilisent `caract`.
+
+*Note méthodologique* : ces informations proviennent d'un `.explain()` exécuté pendant la session de travail (plan physique réel, pas une supposition). La capture d'écran de la Spark UI (onglets **Jobs** → DAG → **Stages**, port 4040) reste à ajouter : elle nécessite d'ouvrir le navigateur pendant que le script tourne (voir les instructions données en cours de projet — lancer `pipeline.py` dans un terminal, `input()` maintient la session ouverte). À faire de préférence après avoir libéré de la RAM sur la machine (2,4 Go seulement disponibles au moment de la rédaction), une session Spark locale ayant besoin de marge mémoire pour démarrer la JVM sans erreur.
+
+## 6. Exploration au-delà du cours
+
+Piste choisie : [AQE et partitions / skew et salting / UDF vs pandas_udf / table gérée et upsert / spark-submit / pushdown mesuré / benchmark formats / streaming ou MLlib]
+Question : [...]
+Protocole (ce qu'on a fait varier, ce qui reste fixe) : [...]
+Mesures : [...]
+Conclusion (même si négative ou contre-intuitive) : [...]
+
+*(à compléter)*
+
+
 ## 7. Ce qu'on a appris et limites
 
 Ce qui a marché :
 - La validation systématique du schéma explicite contre l'en-tête réel du CSV, faite tôt, a évité de construire toute l'analyse sur des colonnes mal alignées (voir section 1).
 - Les trois analyses (agrégation, jointure, window) donnent des résultats cohérents et interprétables sans retraitement supplémentaire.
+ dev
 - Écriture de la couche silver en Parquet, débloquée en migrant l'exécution du pipeline vers Debian (WSL2) : contournement du blocage `winutils.exe`/`HADOOP_HOME` propre à Spark sous Windows natif, sans changer une ligne de code métier.
 
 Ce qui a bloqué :
 - Spark sous Windows natif ne peut pas écrire localement sans `winutils.exe`/`HADOOP_HOME` — contourné en exécutant le pipeline dans Debian (WSL2), où l'écriture Parquet fonctionne nativement.
 - Antivirus (Norton 360) mettant en quarantaine des fichiers nécessaires à PySpark lors de l'installation sous Windows (`spark-submit.cmd`, `pyspark.cmd`, `java_gateway.py`), provoquant une installation incomplète. Résolu en ajoutant des exclusions Norton (dans les sections "Exclusions des analyses" et "Exclusions de la surveillance automatique") pour les dossiers `.venv`, Java 17 et `AppData/Local/Temp`, puis en restaurant les fichiers mis en quarantaine — Spark s'exécute ensuite sans interruption.
+
+
+Ce qui a bloqué :
+- Écriture de la couche silver en Parquet non encore effective sur cette machine (Windows, `winutils.exe`/`HADOOP_HOME` manquants) — le nettoyage est validé en mémoire mais pas encore persisté.
+
 - Le cache, optimisation "évidente" sur le papier, s'est révélé contre-productif sur ce volume — bon rappel qu'une optimisation doit toujours être mesurée, jamais supposée.
 
 Ce qu'on ferait avec plus de temps :
 - Retester le cache sur un volume multi-années pour identifier le seuil à partir duquel il devient rentable.
+dev
 - Lire la couche silver Parquet fraîchement écrite pour vérifier le partition pruning (plan `.explain()` avec filtre sur la colonne de partition).
+
+- Écrire réellement la couche silver partitionnée une fois l'environnement Hadoop/Windows réglé.
+
