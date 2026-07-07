@@ -253,7 +253,7 @@ Commentaire : deux shuffles pour une opération qui semble être « juste un `gr
 
 ## 6. Exploration au-delà du cours
 
-Piste choisie : **AQE et nombre de partitions**. Elle découle directement d'une anomalie repérée en section 5 : le rapport supposait `spark.sql.shuffle.partitions` (200 par défaut) directement responsable du nombre de tasks exécutées, alors que l'API REST de la Spark UI montrait un nombre de tasks bien plus faible en pratique. Cette exploration mesure pourquoi.
+montrait un nombre de tasks bien plus faible en pratique. Cette exploration mesure pourquoi.
 
 **Question** : sur ce volume (54 402 lignes), quel est l'effet réel de l'Adaptive Query Execution (AQE) et du nombre de partitions de shuffle sur (a) le nombre de tasks effectivement exécutées et (b) le temps d'exécution d'une agrégation (`caract.groupBy("dep").count()`) ?
 
